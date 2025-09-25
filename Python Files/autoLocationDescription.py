@@ -1,18 +1,22 @@
 import pandas as pd
 import pyperclip
-import shutil
 import os
-import re
 import math
-import sqlite3
+import re
 import sys
 
-# db_path = r"C:\Users\asset\OneDrive - Asset Inspect\AI Shared Folder\Administration\Programs\Databases\special_location_descriptions.db"
+if getattr(sys, 'frozen', False):
+    # Running as an executable
+    script_dir = sys._MEIPASS
+else:
+    # Running as a script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
 
-base_dir = os.path.dirname(__file__)
-db_path = os.path.join(base_dir, "Databases", "special_location_descriptions.db")
+file1 = os.path.join(script_dir, "ABS Stats", "SAL_2021_AUST.csv")
+file2 = os.path.join(script_dir, "ABS Stats", "2021Census_G01_AUST_SAL.csv")
+file3 = os.path.join(script_dir, "ABS Stats", "suburbs.csv")
 
-table_name = "descriptions"
+statesLs = ['NSW', 'VIC', 'QLD', 'SA', 'WA', 'TAS', 'NT', 'ACT']
 
 state_mapping = {
     "QLD": "Queensland",
@@ -44,7 +48,7 @@ city_lng_lat = {
     "Melbourne": (-37.8136, 144.9631),
     "Hobart": (-42.8826, 147.3257),
     "Perth": (-31.9514, 115.8617),
-    "Canberra": (35.2802, 149.1310)
+    "Canberra": (-35.2802, 149.1310)
 }
 
 def haversine_distance_and_direction(lat1, lon1, lat2, lon2):
@@ -95,8 +99,6 @@ def haversine_distance_and_direction(lat1, lon1, lat2, lon2):
         direction = "West"
     elif 292.5 <= bearing < 337.5:
         direction = "North-West"
-    else:
-        print(bearing)
 
     return distance, direction
 
@@ -104,6 +106,8 @@ def get_population(suburb_name, file1, file2, statesLs):
     # Read the two CSV files
     df1 = pd.read_csv(file1)
     df2 = pd.read_csv(file2)
+
+    suburb_name = suburb_name.strip()
 
     exact_matches = df1[df1['SAL_NAME_2021'] == suburb_name]
 
@@ -116,18 +120,23 @@ def get_population(suburb_name, file1, file2, statesLs):
 
         if not partial_matches.empty:
             print("Multiple matches found:")
-            x = 1
-            for i, row in partial_matches.iterrows():
-                print(f"{x}. {row['SAL_NAME_2021']}")
-                x += 1
+            while True:
+                x = 1
+                for i, row in partial_matches.iterrows():
+                    print(f"{x}. {row['SAL_NAME_2021']}")
+                    x += 1
 
-            choice = int(input("Please select a match: "))
+                choice = int(input("Please select a match: "))
+                if choice >= x or not choice:
+                    print('Selection invalid. Enter the number to the left of the suburb you want.')
+                else: break
+
             suburb_name = partial_matches.iloc[choice-1]['SAL_NAME_2021']
             code = partial_matches.iloc[choice-1]['SAL_CODE_2021']
             state = partial_matches.iloc[choice-1]['STATE_CODE_2021']
         else:
-            print(f"Suburb '{suburb_name}' not found.")
-            return
+            print(f"Suburb '{suburb_name}' not found in ABS Population csv.")
+            return None, None, None
 
     stateName = statesLs[int(state)-1]
 
@@ -136,27 +145,51 @@ def get_population(suburb_name, file1, file2, statesLs):
 
     return population, suburb_name, stateName
 
-def get_location(suburb_name, file, state):
+def get_location(suburb_name, file, state, suburb_name_long):
     citylat, citylong = city_lng_lat[state_capital_mapping[state]]
+
+    longName = False
+
+    suburb_name = suburb_name.strip()
+
+    identifier = re.search(r'\(([^-]+)-', suburb_name_long)
+
+    if identifier:
+        identifier = identifier.group(1).strip()
+    else:
+        indentifier = ''
 
     df = pd.read_csv(file)
 
     exact_matches = df[df['suburb'] == suburb_name]
 
     if len(exact_matches) == 0:
-        print('Cant find the suburb')
-        exit()
+        exact_matches = df[df['suburb'] == suburb_name_long]
+        if len(exact_matches) == 0:
+            print('Cant find the suburb in suburbs.csv')
+            return None, None, None
+        longName = True
 
     if len(exact_matches) != 1:
         exact_matches = exact_matches[exact_matches['state'] == state]
-        if len(exact_matches) != 1:
-            print("Multiple matches found in same state:")
-            x=1
-            for i, row in exact_matches.iterrows():
-                print(f"{x}. {row['suburb']}, {row['local_goverment_area']}")
-                x += 1
-            choice = int(input("Please select a match: "))
-            suburbRow = exact_matches.iloc[choice-1]
+        identifier_matches = []
+        if identifier:
+            identifier_matches = exact_matches[exact_matches['local_goverment_area'].str.contains(identifier, na=False)]
+        if len(identifier_matches) == 1:
+            suburbRow = identifier_matches.iloc[0]
+        elif len(exact_matches) != 1:
+            print("Multiple matches found in same state (identifier not found):")
+            while True:
+                x=1
+                for i, row in exact_matches.iterrows():
+                    print(f"{x}. {row['suburb']}, {row['local_goverment_area']}")
+                    x += 1
+                choice = int(input("Please select a match: "))
+                if choice >= x or not choice:
+                    print('Selection invalid. Enter the number to the left of the suburb you want.')
+                else:
+                    break
+            suburbRow = exact_matches.iloc[choice-1]       
         else:
             suburbRow = exact_matches.iloc[0]
     else:
@@ -168,110 +201,46 @@ def get_location(suburb_name, file, state):
 
     distance, direction = haversine_distance_and_direction(citylat, citylong, lat, lng)
 
-    return distance, direction, lga
-
-def search_specials(location, lga):
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-
-    # Query the database for the given Location and LGA
-    cursor.execute(f"""
-        SELECT Description FROM {table_name}
-        WHERE Location = ? AND LGA = ?
-    """, (location, lga))
-
-    result = cursor.fetchone()  # Fetch a single result
-
-    conn.close()
-
-    if result:
-        return result[0]  # Return the description
-    else:
-        return None  # No matching entry found
+    return distance, direction, lga, longName
     
-def updateSpecial(suburb_name, lga, description):
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
 
-    # Check if the entry exists
-    cursor.execute(f"""
-        SELECT 1 FROM {table_name} WHERE Location = ? AND LGA = ?
-    """, (suburb_name, lga))
+# Main Loop
+while True:
+    print("Enter suburb:")
+    suburb_name = input()
 
-    if cursor.fetchone():
-        # Update existing entry
-        cursor.execute(f"""
-            UPDATE {table_name}
-            SET Description = ?
-            WHERE Location = ? AND LGA = ?
-        """, (description, suburb_name, lga))
-    else:
-        # Insert new entry
-        cursor.execute(f"""
-            INSERT INTO {table_name} (Location, LGA, Description)
-            VALUES (?, ?, ?)
-        """, (suburb_name, lga, description))
+    if suburb_name == 'e': exit()
 
-    conn.commit()
-    conn.close()
+    if suburb_name.lower() == 'help':
+        print("------------------")
+        print("This program takes in a suburb name and returns a short description of the suburb.")
+        print("This program IS case sensitive, so you must capitalise the suburb's name correctly")
+        print("If there are multiple suburbs of the same name, the program will request clarification")
+        print("To clarify which suburb, type in the number to the left of the suburb you want (in the list) and press enter")
+        continue
 
-    print(f"Entry updated/inserted for {suburb_name}, {lga}.")
+    population, suburb_name_long, state = get_population(suburb_name, file1, file2, statesLs)
+    if population == None or suburb_name_long == None or state == None:
+        continue
 
-statesLs = ['NSW', 'VIC', 'QLD', 'SA', 'WA', 'TAS', 'NT', 'ACT']
+    distance, direction, lga, longName = get_location(suburb_name, file3, state, suburb_name_long)
+    if distance == None or direction == None or lga == None:
+        continue
 
-file1 = r"c:\Users\asset\OneDrive\Desktop\Automation Stuff\RI-Code\ABS Stats\SAL_2021_AUST.csv"
-file2 = r"c:\Users\asset\OneDrive\Desktop\Automation Stuff\RI-Code\ABS Stats\2021Census_G01_AUST_SAL.csv"
-file3 = r"c:\Users\asset\OneDrive\Desktop\Automation Stuff\RI-Code\ABS Stats\suburbs.csv"
+    if longName:
+        suburb_name = suburb_name_long
 
-def main():
-    while True:
-        editing = False
+    distance = round(distance)
 
-        suburb_name = input().strip()
+    lga = lga.split("(")[0].strip()
 
-        if suburb_name == 'e': exit()
+    metro = (distance < 50)
 
-        if suburb_name[0] == '#':
-            editing = True
-            suburb_name = suburb_name[1:]
+    # if suburb_name not in lga:
+    #     description = f"The subject property is located in {suburb_name}, a suburb of {state_capital_mapping[state]}, {state_mapping[state]}. {suburb_name} has a current population of {population:,} and is located {distance}km {direction.lower()} of {state_capital_mapping[state]} CBD in the {lga} local government area."
+    # else:
+    #     description = f"The subject property is located in {suburb_name}, a suburb of {state_capital_mapping[state]}, {state_mapping[state]}. {suburb_name} has a current population of {population:,} and is located {distance}km {direction} of {state_capital_mapping[state]} CBD."
 
-        population, suburb_name_long, state = get_population(suburb_name, file1, file2, statesLs)
-        distance, direction, lga = get_location(suburb_name, file3, state)
-
-        distance = round(distance)
-
-        lga = lga.split("(")[0].strip()
-
-        special = search_specials(suburb_name, lga)
-
-        if editing:
-            print("Current description:")
-
-        if special:
-            description = special
-
-        else:
-            if distance < 60:
-                if suburb_name not in lga:
-                    description = f"The subject property is located in {suburb_name}, a suburb of {state_capital_mapping[state]}, {state_mapping[state]}. {suburb_name} has a current population of {population:,} and is located {distance}km {direction.lower()} of {state_capital_mapping[state]} CBD in the {lga} local government area."
-                else:
-                    description = f"The subject property is located in {suburb_name}, a suburb of {state_capital_mapping[state]}, {state_mapping[state]}. {suburb_name} has a current population of {population:,} and is located {distance}km {direction} of {state_capital_mapping[state]} CBD."
-            else:
-                if suburb_name not in lga:
-                    description = f"The subject property is located in {suburb_name}, a town in {state_mapping[state]}. {suburb_name} has a current population of {population:,} and is located {distance}km {direction.lower()} of {state_capital_mapping[state]} in the {lga} local government area."
-                else:
-                    description = f"The subject property is located in {suburb_name}, a town in {state_mapping[state]}. {suburb_name} has a current population of {population:,} and is located {distance}km {direction.lower()} of {state_capital_mapping[state]}."
-
-        print(description)
-        
-        if editing:
-            print("Copy and paste the updated description. Then enter>ctrl-z>enter.")
-            newDesc = sys.stdin.read().strip()
-            updateSpecial(suburb_name, lga, newDesc)
-
-        else:
-            pyperclip.copy(description)
-
-        
-
-main()
+    description = f"The subject property is located in {suburb_name}, a {f'suburb of {state_capital_mapping[state]},' if metro else 'town in'} {state_mapping[state]}. {suburb_name} has a current population of {population:,} and is located {distance}km {direction.lower()} of {state_capital_mapping[state]}{' CBD' if metro else ''}{'.' if suburb_name in lga else f' in the {lga} local government area.'} "
+    print(description)
+    pyperclip.copy(description)
